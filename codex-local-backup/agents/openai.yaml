@@ -1,0 +1,3 @@
+interface:
+  display_name: "Codex 本地会话备份"
+  short_description: "增量备份本机会话、压缩日志与关联成果，校验完整性并验证原会话恢复"
