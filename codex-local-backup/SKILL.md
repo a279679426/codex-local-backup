@@ -2,7 +2,7 @@
 name: codex-local-backup
 description: 备份本机 Codex 会话、普通和压缩 session 日志及关联成果，导出可读聊天、增量历史与校验报告；用于手动备份、定期备份、检查遗漏和迁移前恢复验证。不处理云端聊天、账号解封或浏览器登录态。
 metadata:
-  version: "1.0.0"
+  version: "1.0.2"
 ---
 
 # Codex 本地备份
@@ -21,7 +21,7 @@ python3 <skill-dir>/scripts/backup.py status
 
 必须保存普通 .jsonl **和压缩 .jsonl.zst**，包括 sessions、archived_sessions。存在会话数据库时用 SQLite backup API 保存最高数字版本的 state_N.sqlite 和 thread_history_N.sqlite；遇到不支持的结构报告 partial，不假定所有版本兼容。只有日志的旧环境走原始日志解析。原始记录完整留存，可读文本只提取用户和助手消息，工具与其他上下文保留在原始记录中。
 
-关联文件为尽力识别：默认从当前用户 Desktop/Documents/Downloads、会话项目目录及 Codex 媒体目录收集已引用的现存文件；--include 扩展允许范围。不是全盘或整个项目递归备份，未解析引用、失效路径和复制失败要分别报告。跳过登录凭据、常见密钥、浏览器资料与依赖目录，但聊天文本本身仍可能含敏感信息。不要自动上传备份。
+关联文件为尽力识别：默认从当前用户 Desktop/Documents/Downloads、会话项目目录及 Codex 媒体目录收集已引用的现存文件；--include 扩展允许范围。不是全盘或整个项目递归备份，分别报告明确引用缺失（unresolved_path_references）、未证实的聊天文本路径（unconfirmed_text_path_references）以及实际复制失败（issues）。文本候选仍可收集现存文件；未证实的路径不等同于文件丢失。跳过登录凭据、常见密钥、浏览器资料与依赖目录，但聊天文本本身仍可能含敏感信息。不要自动上传备份。
 
 objects 按内容去重，snapshots 保留历史版本；支持硬链接的目标盘复用内容，不支持时退回复制。不要编辑备份文件。不硬链接实时来源，不自动删除源文件或旧快照。默认保留至少 15 GiB 空间，低于此值报告失败；不要擅自降低保留值或删除数据。
 
