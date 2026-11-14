@@ -46,6 +46,33 @@ class BackupTest(unittest.TestCase):
         self.assertEqual(result.returncode,0,result.stderr+result.stdout)
         self.assertEqual(log.read_bytes(),before)
         self.assertTrue((self.latest()/'verification-quick.json').exists())
+    def test_reference_classification_and_symlink_exclusion(self):
+        self.modern()
+        missing=self.base/'missing.png'
+        noise=self.base/'example.txt'
+        literal=self.base/'100%20.txt'
+        literal.write_text('keep literal percent escape')
+        secret=self.base/'credentials.json'
+        secret.write_text('test secret')
+        alias=self.base/'public.txt'
+        alias.symlink_to(secret)
+        con=sqlite3.connect(self.source/'thread_history_2.sqlite')
+        body={'content':[{'type':'text','text':str(noise)},
+             {'type':'localImage','path':str(missing)},
+             {'type':'localImage','path':str(literal)},
+             {'type':'localImage','path':str(alias)}]}
+        con.execute('UPDATE thread_items SET item_json=?',(json.dumps(body),))
+        con.commit();con.close()
+        r=self.run_backup();self.assertEqual(r.returncode,0,r.stderr+r.stdout)
+        snap=self.latest()
+        summary=json.loads((snap/'summary.json').read_text())
+        self.assertEqual(summary['unresolved_path_references'],[str(missing)])
+        self.assertEqual(summary['unconfirmed_text_path_references'],[str(noise)])
+        sources={m['source'] for m in json.loads((snap/'manifest.json').read_text())}
+        self.assertIn(str(literal),sources)
+        self.assertNotIn(str(alias),sources)
+        self.assertNotIn(str(secret),sources)
+
     def test_versions_secrets_and_corruption(self):
         log=self.modern();asset=self.source/'attachments'/'photo.txt';asset.parent.mkdir();asset.write_text('first')
         (asset.parent/'.env.production').write_text('never export')

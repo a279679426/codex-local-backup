@@ -83,7 +83,7 @@ class Backup:
         self.objects=root/'objects';self.objects.mkdir(parents=True,exist_ok=True)
         self.cache_path=root/'file-cache.json'
         self.cache=json.loads(self.cache_path.read_text(encoding='utf-8')) if self.cache_path.exists() else {}
-        self.entries=[];self.issues=[];self.excluded=set();self.candidates=set()
+        self.entries=[];self.issues=[];self.excluded=set();self.candidates=set();self.explicit_refs=set()
         self.allowed=[Path.home()/x for x in ['Desktop','Documents','Downloads']]+[source/x for x in ['attachments','generated_images','visualizations','skills']]
         self.allowed.extend(Path(p).expanduser().resolve() for p in include)
     def reserve(self,n):
@@ -119,32 +119,48 @@ class Backup:
         except Exception as e:
             self.issues.append({'source':str(src),'error':str(e),'backup':str(relative)})
             return False
-    def path(self,s):
-        if not isinstance(s,str) or '\n' in s or len(s)>4096:return
-        s=unquote(s.removeprefix('file://'));s=re.sub(r':\d+(?::\d+)?$','',s)
+    @staticmethod
+    def excluded_path(p):
+        parts={part.lower() for part in p.parts}
+        return (
+            bool(parts & (SKIP | {'.ssh','.aws','.gnupg','cookies','keychains','chromium','google chrome','firefox','safari','microsoft edge','bravesoftware','browser profiles'}))
+            or p.name.lower() in {name.lower() for name in SECRET}
+            or p.name.lower().startswith('.env')
+            or p.suffix.lower() in {'.pem','.key','.p12','.pfx'}
+        )
+
+    def path(self,s,explicit=True):
+        if not isinstance(s,str) or len(s)>4096:return
+        s=unquote(s.removeprefix('file://')) if s.startswith('file://') else s
+        if any(ord(c)<32 for c in s):return
+        s=re.sub(r':\d+(?::\d+)?$','',s)
         p=Path(s).expanduser()
         if not p.is_absolute():return
         p=Path(os.path.normpath(p))
         if p.is_relative_to(self.root) or not any(p.is_relative_to(a) for a in self.allowed):return
-        if any(part in SKIP or part.lower() in {'.ssh','.aws','.gnupg','cookies','keychains'} for part in p.parts) or p.name in SECRET or p.name.startswith('.env') or p.suffix.lower() in {'.pem','.key','.p12','.pfx'}:return
+        if self.excluded_path(p):return
         try:
             resolved=p.resolve()
+            if resolved.is_relative_to(self.root.resolve()) or self.excluded_path(resolved):return
             if not any(resolved.is_relative_to(a.resolve()) for a in self.allowed):return
-        except OSError:return
+        except (OSError,RuntimeError,ValueError):return
         self.candidates.add(p)
+        if explicit:self.explicit_refs.add(p)
     def inspect(self,v):
         if isinstance(v,dict):
             for k,val in v.items():
-                self.path(k);self.inspect(val)
+                self.path(k,explicit=False)
+                if k in {'path','file_path','filePath','url'} and isinstance(val,str):self.path(val)
+                self.inspect(val)
         elif isinstance(v,list):
             for val in v:self.inspect(val)
         elif isinstance(v,str):
             if v.startswith('data:'):return
-            if v.startswith(('/','~/','file:///')) or re.match(r'^[A-Za-z]:[\\/]',v):self.path(v)
+            if v.startswith(('/','~/','file:///')) or re.match(r'^[A-Za-z]:[\\/]',v):self.path(v,explicit=False)
             for p in re.findall(r'\]\((?:<)?((?:file://)?/[^\n]*?)(?:>)?\)',v):self.path(p)
-            for p in re.findall(r'["\x27`]((?:/Users/|/home/|~/)[^\n"\x27`]+)["\x27`]',v):self.path(p)
-            for p in re.findall(r'/(?:Users|home)/[^\s<>"\x27`\[\](){}，。；：]+',v):self.path(p.rstrip('.,;'))
-            for p in re.findall(r'[A-Za-z]:[\\/][^\n<>"\x27`|]+',v):self.path(p.rstrip('.,;) '))
+            for p in re.findall(r'["\x27`]((?:/Users/|/home/|~/)[^\n"\x27`]+)["\x27`]',v):self.path(p,explicit=False)
+            for p in re.findall(r'/(?:Users|home)/[^\s<>"\x27`\[\](){}，。；：]+',v):self.path(p.rstrip('.,;'),explicit=False)
+            for p in re.findall(r'[A-Za-z]:[\\/][^\n<>"\x27`|]+',v):self.path(p.rstrip('.,;) '),explicit=False)
     def seed(self,baseline):
         # A verified old backup can populate objects without another full disk copy.
         count=0
@@ -252,13 +268,14 @@ class Backup:
             if prev.exists():
                 for m in json.loads(prev.read_text(encoding='utf-8')):
                     if m['backup'].startswith('关联文件/') and m.get('source'):self.path(m['source'])
-        missing=[]
+        missing=[];unconfirmed=[]
         for p in sorted(self.candidates):
             try:
                 if p.is_file():
                     rel=Path(re.sub(r'[^A-Za-z0-9]','_',p.drive))/Path(*p.parts[1:]) if p.drive else Path(str(p).lstrip('/'))
                     self.ingest(p,Path('关联文件')/rel)
-                elif not p.exists():missing.append(str(p))
+                elif not p.exists():
+                    (missing if p in self.explicit_refs else unconfirmed).append(str(p))
             except OSError as e:self.issues.append({'source':str(p),'error':str(e)})
         # The skill itself travels with the archive.
         skill=Path(__file__).resolve().parents[1]
@@ -267,7 +284,7 @@ class Backup:
         with (self.stage/'会话索引.md').open('w',encoding='utf-8') as f:
             f.write('# 本地会话索引\n\n')
             for c in chats:f.write(f'- [{c["title"].replace("[", "").replace("]", "")}]({quote(c["file"])})（{c["messages"]} 条消息）\n')
-        summary={'created_at':stamp(),'source_home':str(self.source),'chats':len(chats),'messages':sum(c['messages'] for c in chats),'raw_logs':sum(m['backup'].startswith(('原始记录/sessions/','原始记录/archived_sessions/')) for m in self.entries),'associated_files':sum(m['backup'].startswith('关联文件/') for m in self.entries),'missing_rollout_threads':log_missing,'unresolved_path_references':missing,'issues':self.issues,'sessions':chats,'status':'complete' if not self.issues and not log_missing else 'partial'}
+        summary={'created_at':stamp(),'source_home':str(self.source),'chats':len(chats),'messages':sum(c['messages'] for c in chats),'raw_logs':sum(m['backup'].startswith(('原始记录/sessions/','原始记录/archived_sessions/')) for m in self.entries),'associated_files':sum(m['backup'].startswith('关联文件/') for m in self.entries),'missing_rollout_threads':log_missing,'unresolved_path_references':missing,'unconfirmed_text_path_references':unconfirmed,'issues':self.issues,'sessions':chats,'status':'complete' if not self.issues and not log_missing else 'partial'}
         dump(self.stage/'summary.json',summary)
         (self.stage/'README.md').write_text('从会话索引.md 阅读历史；summary.json 查看缺失与错误。原始记录含 .jsonl 与 .jsonl.zst，迁移时均须保留。整个定期备份目录应复制到另一存储设备；仅本机同盘备份无法应对硬盘损坏。当前快照不自动等于恢复已验证。原始文件路径保留原样，按 manifest.json 查对应副本。objects 与 snapshots 通过硬链接去重，不要直接编辑备份文件。无自动删除或清理。',encoding='utf-8')
         tracked={m['backup'] for m in self.entries}
